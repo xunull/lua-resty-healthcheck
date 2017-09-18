@@ -352,42 +352,6 @@ end
 --============================================================================
 
 
---- Run the given function holding a lock on the target.
--- WARNING: the callback will run unprotected, so it should never
--- throw an error, but always return nil+error instead.
--- @param self The checker object
--- @param ip Target IP
--- @param port Target port
--- @param fn The function to execute
--- @return The results of the function; or nil and an error message
--- in case it fails locking.
-local function locking_target(self, ip, port, fn)
-  local lock, lock_err = resty_lock.new(self.shm, {
-                  exptime = 10,  -- timeout after which lock is released anyway
-                  timeout = 5,   -- max wait time to acquire lock
-                })
-  if not lock then
-    return nil, "failed to create lock:" .. lock_err
-  end
-  local lock_key = get_shm_key(self.TARGET_LOCK, ip, port)
-
-  local ok, err = lock:lock(lock_key)
-  if not ok then
-    return nil, "failed to acquire lock: " .. err
-  end
-
-  local final_ok, final_err = fn()
-
-  ok, err = lock:unlock()
-  if not ok then
-    -- recoverable: not returning this error, only logging it
-    self.log(ERR, "failed to release lock '", lock_key, "': ", err)
-  end
-
-  return final_ok, final_err
-end
-
-
 --- Increment the healthy or unhealthy counter. If the threshold of occurrences
 -- is reached, it changes the status of the target in the shm and posts an
 -- event.
@@ -412,39 +376,36 @@ local function incr_counter(self, mode, ip, port)
     return true
   end
 
-  return locking_target(self, ip, port, function()
+  local counter, other, limit
+  if mode == "healthy" then
+    counter = self.TARGET_OKS
+    other   = self.TARGET_NOKS
+    limit  = self.healthy_config.occurrences
+  else
+    counter = self.TARGET_NOKS
+    other   = self.TARGET_OKS
+    limit  = self.unhealthy_config.occurrences
+  end
 
-    local counter, other, limit
-    if mode == "healthy" then
-      counter = self.TARGET_OKS
-      other   = self.TARGET_NOKS
-      limit  = self.healthy_config.occurrences
-    else
-      counter = self.TARGET_NOKS
-      other   = self.TARGET_OKS
-      limit  = self.unhealthy_config.occurrences
-    end
+  -- first reset the alternate-counter to prevent race-conditions
+  local other_key = get_shm_key(other, ip, port)
+  self.shm:set(other_key, 0)
 
-    local counter_key = get_shm_key(counter, ip, port)
-    local ctr, err = self.shm:incr(counter_key, 1, 0)
-    if err then
-      return nil, err
-    end
-    if ctr == 1 then
-      local other_key = get_shm_key(other, ip, port)
-      self.shm:set(other_key, 0)
-    end
+  -- only after increment the counter for the current 'mode'
+  local counter_key = get_shm_key(counter, ip, port)
+  local ctr, err = self.shm:incr(counter_key, 1, 0)
+  if err then
+    return nil, err
+  end
 
-    if ctr >= limit then
-      local status_key = get_shm_key(self.TARGET_STATUS, ip, port)
-      self.shm:set(status_key, mode == "healthy")
-      self:raise_event(self.events[mode], ip, port)
-    end
+  -- lastly update target status if necessary
+  if ctr == limit then
+    local status_key = get_shm_key(self.TARGET_STATUS, ip, port)
+    self.shm:set(status_key, mode == "healthy")
+    self:raise_event(self.events[mode], ip, port)
+  end
 
-    return true
-
-  end)
-
+  return true
 end
 
 
