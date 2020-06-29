@@ -655,19 +655,64 @@ function checker:report_http_status(ip, port, hostname, http_status, check)
   local checks = self.checks[check or "passive"]
 
   local status_type, limit, ctr
-  if checks.healthy.http_statuses[http_status] then
-    status_type = "healthy"
-    limit = checks.healthy.successes
-    ctr = CTR_SUCCESS
-  elseif checks.unhealthy.http_statuses[http_status]
-      or http_status == 0 then
-    status_type = "unhealthy"
-    limit = checks.unhealthy.http_failures
-    ctr = CTR_HTTP
-  else
-    return
-  end
 
+  if check == "passive" then
+    if checks.health.http_status_non_unhealthy then
+      if not checks.unhealthy.http_statuses[http_status] then
+        status_type = "healthy"
+        limit = checks.healthy.successes
+        ctr = CTR_SUCCESS
+      else
+        status_type = "unhealthy"
+        limit = checks.unhealthy.http_failures
+        ctr = CTR_HTTP
+      end
+    else
+      if checks.healthy.http_statuses[http_status] then
+        status_type = "healthy"
+        limit = checks.healthy.successes
+        ctr = CTR_SUCCESS
+      elseif checks.unhealthy.http_statuses[http_status]
+        or http_status == 0 then
+        status_type = "unhealthy"
+        limit = checks.unhealthy.http_failures
+        ctr = CTR_HTTP
+      else
+        return
+      end
+    end
+  else
+    if checks.healthy.http_status_class_success
+      or checks.healthy.http_status_class_redirection then
+      if checks.healthy.http_status_class_success and 200 <= http_status < 300 then
+        status_type = "healthy"
+        limit = checks.healthy.successes
+        ctr = CTR_SUCCESS
+      elseif checks.healthy.http_status_class_redirection and 300 <= http_status < 400 then
+        status_type = "healthy"
+        limit = checks.healthy.successes
+        ctr = CTR_SUCCESS
+      else
+        -- It is wrong to temporarily think that this is not the success class or the redirection class
+        status_type = "unhealthy"
+        limit = checks.unhealthy.http_failures
+        ctr = CTR_HTTP
+      end
+    else
+      if checks.healthy.http_statuses[http_status] then
+        status_type = "healthy"
+        limit = checks.healthy.successes
+        ctr = CTR_SUCCESS
+      elseif checks.unhealthy.http_statuses[http_status]
+        or http_status == 0 then
+        status_type = "unhealthy"
+        limit = checks.unhealthy.http_failures
+        ctr = CTR_HTTP
+      else
+        return
+      end
+    end
+  end
   return incr_counter(self, status_type, ip, port, hostname, limit, ctr)
 
 end
@@ -1222,12 +1267,16 @@ local defaults = {
       healthy = {
         interval = 0, -- 0 = disabled by default
         http_statuses = { 200, 302 },
+        http_status_class_success = false, -- true = all 2xx code is success
+        http_status_class_redirection = false, -- true = all 3xx code is success
         successes = 2,
       },
       unhealthy = {
         interval = 0, -- 0 = disabled by default
         http_statuses = { 429, 404,
                           500, 501, 502, 503, 504, 505 },
+        http_status_class_client_error = false, -- true = all 4xx code is error
+        http_status_class_server_error = false, -- true = all 5xx code is error
         tcp_failures = 2,
         timeouts = 3,
         http_failures = 5,
@@ -1238,10 +1287,11 @@ local defaults = {
       healthy = {
         http_statuses = { 200, 201, 202, 203, 204, 205, 206, 207, 208, 226,
                           300, 301, 302, 303, 304, 305, 306, 307, 308 },
+        http_status_non_unhealthy = false, -- true = if code is not in unhealthy http_statuses list that it's health
         successes = 5,
       },
       unhealthy = {
-        http_statuses = { 429, 500, 503 },
+        http_statuses = { 429, 502, 503 },
         tcp_failures = 2,
         timeouts = 7,
         http_failures = 5,
